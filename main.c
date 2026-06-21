@@ -5,10 +5,11 @@
 #include <arpa/inet.h>
 #include <sys/socket.h>
 
-#define PORT 4545
+#define SWS_VERSION "0.0.1"
+#define SERVER_PORT 4545
 #define MAX_REQUESTS_QUEUE_LENGHT 10
 
-int start_server(void)
+int start_http_server(void)
 {
     int server_fd, client_socket_fd;
     struct sockaddr_in server_addr;
@@ -16,7 +17,7 @@ int start_server(void)
 
     server_fd = socket(AF_INET, SOCK_STREAM, 0);
 
-    if(server_fd < 0)
+    if (server_fd < 0)
     {
         perror("ERROR | socket initialization failed");
         exit(EXIT_FAILURE);
@@ -24,18 +25,18 @@ int start_server(void)
 
     server_addr.sin_family = AF_INET;
     server_addr.sin_addr.s_addr = INADDR_ANY;
-    server_addr.sin_port = htons(PORT);
+    server_addr.sin_port = htons(SERVER_PORT);
 
     bind(server_fd, (struct sockaddr *)&server_addr, sizeof(server_addr));
     listen(server_fd, MAX_REQUESTS_QUEUE_LENGHT);
 
-    printf("INFO | server listening at %d...\n", PORT);
+    printf("INFO | server listening at %d...\n", SERVER_PORT);
 
-    while(1)
+    while (1)
     {
         client_socket_fd = accept(server_fd, (struct sockaddr *)&server_addr, (socklen_t *)&addrlen);
 
-        if(client_socket_fd < 0)
+        if (client_socket_fd < 0)
         {
             perror("ERROR | fail to accept connection");
             continue;
@@ -46,20 +47,30 @@ int start_server(void)
         printf("INFO | request received...\n%s\n", buffer);
 
         char *http_response = "HTTP/1.1 200 OK\r\n"
-                          "Content-Type: text/plain\r\n"
-                          "Content-Length: 12\r\n"
-                          "\r\n"
-                          "Hello World!";
+                              "Content-Type: text/plain\r\n"
+                              "Content-Length: 12\r\n"
+                              "\r\n"
+                              "Hello World!";
 
         write(client_socket_fd, http_response, strlen(http_response));
         close(client_socket_fd);
     }
-    
+
     exit(EXIT_SUCCESS);
 }
 
-int main(void) 
+void show_welcome_message(void)
 {
-  start_server();
-  exit(EXIT_SUCCESS);
+    printf("\n");
+    printf("=============================================\n");
+    printf("SWS - Simple Web Server %s\n", SWS_VERSION);
+    printf("=============================================\n");
+    printf("\n");
+}
+
+int main(void)
+{
+    show_welcome_message();
+    start_http_server();
+    exit(EXIT_SUCCESS);
 }
