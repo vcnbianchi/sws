@@ -1,0 +1,7 @@
+Checks: >
+  bugprone-*,
+  performance-*,
+  readability-*,
+  clang-analyzer-*
+
+WarningsAsErrors: '*'
