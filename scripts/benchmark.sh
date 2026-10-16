@@ -169,7 +169,7 @@ sample_resources() {
 
   while kill -0 "$pid" 2>/dev/null; do
     local pids files=() count=0
-    pids="$pid $(pgrep -P "$pid" | tr '\n' ' ')"
+    pids="$pid $(pgrep -P "$pid" | tr '\n' ' ' || true)"
     for p in $pids; do
       files+=("/proc/$p/status" "/proc/$p/smaps_rollup")
       count=$((count + 1))
