@@ -115,7 +115,7 @@ record_environment() {
     echo "kernel: $(uname -srvmo)"
     [[ -r /etc/os-release ]] && grep PRETTY_NAME /etc/os-release
     echo "cpu: $(grep -m1 'model name' /proc/cpuinfo | cut -d: -f2- | sed 's/^ //')"
-    echo "cpus (nproc): $(nproc)"
+    echo "cpus: $(nproc --all) online, $(nproc) available to this script"
     echo "memory: $(grep MemTotal /proc/meminfo | awk '{print $2 " kB"}')"
     echo "wrk: $(wrk -v 2>&1 | head -n1)"
     echo "sws: $("$BIN" --version)"
