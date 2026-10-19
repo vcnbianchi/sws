@@ -91,6 +91,9 @@ CLIENT_PREFIX=()
 [[ -n "$CLIENT_CPUS" ]] && CLIENT_PREFIX=(taskset -c "$CLIENT_CPUS")
 
 CLK_TCK=$(getconf CLK_TCK)
+# Busy time of the server CPU is only meaningful when it is pinned to one CPU.
+SERVER_CORE=""
+[[ "$SERVER_CPUS" =~ ^[0-9]+$ ]] && SERVER_CORE=$SERVER_CPUS
 URL="http://127.0.0.1:${PORT}${URL_PATH}"
 SERVER_PID=""
 SAMPLER_PID=""
@@ -112,7 +115,7 @@ record_environment() {
     echo "kernel: $(uname -srvmo)"
     [[ -r /etc/os-release ]] && grep PRETTY_NAME /etc/os-release
     echo "cpu: $(grep -m1 'model name' /proc/cpuinfo | cut -d: -f2- | sed 's/^ //')"
-    echo "cpus (nproc): $(nproc)"
+    echo "cpus: $(nproc --all) online, $(nproc) available to this script"
     echo "memory: $(grep MemTotal /proc/meminfo | awk '{print $2 " kB"}')"
     echo "wrk: $(wrk -v 2>&1 | head -n1)"
     echo "sws: $("$BIN" --version)"
@@ -164,8 +167,20 @@ cpu_ticks() {
   awk '{ print $14 + $15 + $16 + $17 }' "/proc/$1/stat"
 }
 
+cpu_busy_ticks() {
+  # "busy total" jiffies of one CPU from /proc/stat (same source as mpstat):
+  # busy = user + nice + system + irq + softirq; total also counts idle,
+  # iowait and steal.
+  awk -v cpu="cpu$1" '$1 == cpu {
+    print $2 + $3 + $4 + $7 + $8, $2 + $3 + $4 + $5 + $6 + $7 + $8 + $9 }' /proc/stat
+}
+
 sample_resources() {
   local pid=$1 output=$2
+
+  # Runs in a background subshell: a child process exiting between pgrep and
+  # cat makes cat fail, and with errexit/pipefail that would kill the sampler.
+  set +e
 
   while kill -0 "$pid" 2>/dev/null; do
     local pids files=() count=0
@@ -197,6 +212,7 @@ run_scenario() {
   local tag="${model}-c${connections}-r${repetition}"
   local samples="$OUT_DIR/raw/$tag.samples"
   local start_ticks end_ticks start_time end_time wrk_line resources cpu
+  local core_busy0=0 core_total0=0 core_busy1=0 core_total1=0 cpu_core="NA"
 
   echo "==> model=$model connections=$connections repetition=$repetition"
   start_server "$model" "$OUT_DIR/raw/$tag.server.log"
@@ -211,7 +227,13 @@ run_scenario() {
   sample_resources "$SERVER_PID" "$samples" &
   SAMPLER_PID=$!
 
+  if [[ -n "$SERVER_CORE" ]]; then
+    read -r core_busy0 core_total0 < <(cpu_busy_ticks "$SERVER_CORE")
+  fi
   run_wrk "$connections" "$DURATION" "$OUT_DIR/raw/$tag.wrk.txt"
+  if [[ -n "$SERVER_CORE" ]]; then
+    read -r core_busy1 core_total1 < <(cpu_busy_ticks "$SERVER_CORE")
+  fi
 
   end_time=$(date +%s.%N)
   kill "$SAMPLER_PID" 2>/dev/null || true
@@ -237,8 +259,14 @@ run_scenario() {
     wrk_line="0,0,0,0,0,0,0,0,0,0,0,0,0,0,0"
   fi
 
-  echo "$model,$connections,$repetition,$wrk_line,$cpu,$resources" >> "$RESULTS"
-  echo "    $(echo "$wrk_line" | cut -d, -f3) req/s, p99 $(echo "$wrk_line" | cut -d, -f8) ms, cpu ${cpu}%"
+  if [[ -n "$SERVER_CORE" ]] && (( core_total1 > core_total0 )); then
+    cpu_core=$(awk -v b0="$core_busy0" -v b1="$core_busy1" \
+                   -v t0="$core_total0" -v t1="$core_total1" \
+                   'BEGIN { printf "%.1f", (b1 - b0) * 100 / (t1 - t0) }')
+  fi
+
+  echo "$model,$connections,$repetition,$wrk_line,$cpu,$resources,$cpu_core" >> "$RESULTS"
+  echo "    $(echo "$wrk_line" | cut -d, -f3) req/s, p99 $(echo "$wrk_line" | cut -d, -f8) ms, cpu ${cpu}%, server core busy ${cpu_core}%"
   sleep "$COOLDOWN"
 }
 
@@ -252,19 +280,19 @@ summarize() {
       rps[key] += $6;  rps2[key] += $6 * $6
       lat[key] += $7;  p50[key] += $9; p99[key] += $11
       cpu[key] += $19; pss[key] += $22; rss[key] += $20
-      thr[key] += $24; prc[key] += $25
+      thr[key] += $24; prc[key] += $25; core[key] += $26
       err[key] += $14 + $15 + $16 + $17 + $18
     }
     END {
-      print "model,connections,repetitions,rps_mean,rps_stdev,latency_mean_ms,latency_p50_ms,latency_p99_ms,cpu_percent,rss_peak_kb,pss_peak_kb,threads_peak,processes_peak,errors_total"
+      print "model,connections,repetitions,rps_mean,rps_stdev,latency_mean_ms,latency_p50_ms,latency_p99_ms,cpu_percent,rss_peak_kb,pss_peak_kb,threads_peak,processes_peak,errors_total,cpu_core_percent"
       for (i = 1; i <= keys; i++) {
         k = order[i]; c = n[k]
         mean = rps[k] / c
         var = rps2[k] / c - mean * mean; if (var < 0) var = 0
-        printf "%s,%d,%.2f,%.2f,%.3f,%.3f,%.3f,%.1f,%d,%d,%d,%d,%d\n", k, c,
+        printf "%s,%d,%.2f,%.2f,%.3f,%.3f,%.3f,%.1f,%d,%d,%d,%d,%d,%.1f\n", k, c,
                mean, sqrt(var), lat[k] / c, p50[k] / c, p99[k] / c,
                cpu[k] / c, rss[k] / c, pss[k] / c, thr[k] / c, prc[k] / c,
-               err[k]
+               err[k], core[k] / c
       }
     }' "$RESULTS" > "$SUMMARY"
 }
@@ -273,7 +301,7 @@ echo "building..."
 make -C "$PROJECT_DIR" >/dev/null
 record_environment
 
-echo "model,connections,repetition,requests,bytes,rps,latency_mean_ms,latency_stdev_ms,latency_p50_ms,latency_p90_ms,latency_p99_ms,latency_p999_ms,latency_max_ms,errors_connect,errors_read,errors_write,errors_status,errors_timeout,cpu_percent,rss_peak_kb,rss_mean_kb,pss_peak_kb,pss_mean_kb,threads_peak,processes_peak" > "$RESULTS"
+echo "model,connections,repetition,requests,bytes,rps,latency_mean_ms,latency_stdev_ms,latency_p50_ms,latency_p90_ms,latency_p99_ms,latency_p999_ms,latency_max_ms,errors_connect,errors_read,errors_write,errors_status,errors_timeout,cpu_percent,rss_peak_kb,rss_mean_kb,pss_peak_kb,pss_mean_kb,threads_peak,processes_peak,cpu_core_percent" > "$RESULTS"
 
 for model in $MODELS; do
   for connections in $CONNECTIONS; do
